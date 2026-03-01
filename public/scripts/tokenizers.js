@@ -783,6 +783,24 @@ export function getTokenizerModel() {
         }
     }
 
+    if (oai_settings.chat_completion_source === chat_completion_sources.COPILOT && oai_settings.copilot_model) {
+        if (oai_settings.copilot_model.includes('gpt-4o') || oai_settings.copilot_model.includes('gpt-5') || oai_settings.copilot_model.includes('codex')) {
+            return gpt4oTokenizer;
+        }
+        if (oai_settings.copilot_model.includes('gpt-4')) {
+            return gpt4Tokenizer;
+        }
+        if (oai_settings.copilot_model.includes('claude')) {
+            return claudeTokenizer;
+        }
+        if (oai_settings.copilot_model.includes('gemini')) {
+            return gemmaTokenizer;
+        }
+        if (oai_settings.copilot_model.includes('o1') || oai_settings.copilot_model.includes('o3') || oai_settings.copilot_model.includes('o4')) {
+            return gpt4oTokenizer;
+        }
+    }
+
     // Default to Turbo 3.5
     return turboTokenizer;
 }

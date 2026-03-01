@@ -662,6 +662,7 @@ export class ToolManager {
             chat_completion_sources.ZAI,
             chat_completion_sources.SILICONFLOW,
             chat_completion_sources.NANOGPT,
+            chat_completion_sources.COPILOT,
         ];
         return supportedSources.includes(settings.chat_completion_source);
     }
