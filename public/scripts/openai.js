@@ -197,6 +197,7 @@ export const chat_completion_sources = {
     AZURE_OPENAI: 'azure_openai',
     ZAI: 'zai',
     SILICONFLOW: 'siliconflow',
+    COPILOT: 'copilot',
 };
 
 const character_names_behavior = {
@@ -299,6 +300,8 @@ export const settingsToUpdate = {
     chutes_model: ['#model_chutes_select', 'chutes_model', false, true],
     chutes_sort_models: ['#chutes_sort_models', 'chutes_sort_models', false, true],
     siliconflow_model: ['#model_siliconflow_select', 'siliconflow_model', false, true],
+    copilot_model: ['#model_copilot_select', 'copilot_model', false, true],
+    copilot_user_agent: ['#copilot_user_agent', 'copilot_user_agent', false, false],
     electronhub_model: ['#model_electronhub_select', 'electronhub_model', false, true],
     electronhub_sort_models: ['#electronhub_sort_models', 'electronhub_sort_models', false, true],
     electronhub_group_models: ['#electronhub_group_models', 'electronhub_group_models', false, true],
@@ -408,6 +411,8 @@ const default_settings = {
     chutes_model: 'deepseek-ai/DeepSeek-V3-0324',
     chutes_sort_models: 'alphabetically',
     siliconflow_model: 'deepseek-ai/DeepSeek-V3',
+    copilot_model: 'gpt-4o',
+    copilot_user_agent: 'SillyTavern',
     electronhub_model: 'gpt-4o-mini',
     electronhub_sort_models: 'alphabetically',
     electronhub_group_models: false,
@@ -1650,6 +1655,8 @@ export function getChatCompletionModel(settings = null) {
             return settings.azure_openai_model;
         case chat_completion_sources.ZAI:
             return settings.zai_model;
+        case chat_completion_sources.COPILOT:
+            return settings.copilot_model;
         default:
             console.error(`Unknown chat completion source: ${source}`);
             return '';
@@ -2095,6 +2102,24 @@ function saveModelList(data) {
         $('#model_siliconflow_select').val(oai_settings.siliconflow_model).trigger('change');
     }
 
+    if (oai_settings.chat_completion_source === chat_completion_sources.COPILOT) {
+        $('#model_copilot_select').empty();
+        model_list.forEach((model) => {
+            $('#model_copilot_select').append(
+                $('<option>', {
+                    value: model.id,
+                    text: model.display_name || model.id,
+                }));
+        });
+
+        const selectedModel = model_list.find(model => model.id === oai_settings.copilot_model);
+        if (model_list.length > 0 && (!selectedModel || !oai_settings.copilot_model)) {
+            oai_settings.copilot_model = model_list[0].id;
+        }
+
+        $('#model_copilot_select').val(oai_settings.copilot_model).trigger('change');
+    }
+
     if (oai_settings.chat_completion_source === chat_completion_sources.FIREWORKS) {
         $('#model_fireworks_select').empty();
         model_list.forEach((model) => {
@@ -2383,6 +2408,7 @@ function getReasoningEffort(settings = null, model = null) {
         chat_completion_sources.COMETAPI,
         chat_completion_sources.ELECTRONHUB,
         chat_completion_sources.CHUTES,
+        chat_completion_sources.COPILOT,
     ];
 
     if (!reasoningEffortSources.includes(settings.chat_completion_source)) {
@@ -2577,6 +2603,10 @@ export async function createGenerationParameters(settings, model, type, messages
         if (/^gpt-[34]/.test(model)) {
             delete generate_data.reasoning_effort;
         }
+    }
+
+    if (settings.chat_completion_source === chat_completion_sources.COPILOT) {
+        generate_data.copilot_user_agent = settings.copilot_user_agent;
     }
 
     if (!canMultiSwipe && ToolManager.canPerformToolCalls(type, settings, model)) {
@@ -2959,7 +2989,7 @@ export function getStreamingReply(data, state, { chatCompletionSource = null, ov
             }
         });
         return data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '';
-    } else if ([chat_completion_sources.CUSTOM, chat_completion_sources.POLLINATIONS, chat_completion_sources.AIMLAPI, chat_completion_sources.MOONSHOT, chat_completion_sources.COMETAPI, chat_completion_sources.ELECTRONHUB, chat_completion_sources.NANOGPT, chat_completion_sources.ZAI, chat_completion_sources.SILICONFLOW, chat_completion_sources.CHUTES].includes(chat_completion_source)) {
+    } else if ([chat_completion_sources.CUSTOM, chat_completion_sources.POLLINATIONS, chat_completion_sources.AIMLAPI, chat_completion_sources.MOONSHOT, chat_completion_sources.COMETAPI, chat_completion_sources.ELECTRONHUB, chat_completion_sources.NANOGPT, chat_completion_sources.ZAI, chat_completion_sources.SILICONFLOW, chat_completion_sources.CHUTES, chat_completion_sources.COPILOT].includes(chat_completion_source)) {
         if (show_thoughts) {
             state.reasoning +=
                 data.choices?.filter(x => x?.delta?.reasoning_content)?.[0]?.delta?.reasoning_content ??
@@ -4161,6 +4191,10 @@ async function getStatusOpen() {
         data.azure_api_version = oai_settings.azure_api_version;
     }
 
+    if (oai_settings.chat_completion_source === chat_completion_sources.COPILOT) {
+        data.copilot_user_agent = oai_settings.copilot_user_agent;
+    }
+
     const canBypass = (oai_settings.chat_completion_source === chat_completion_sources.OPENAI && oai_settings.bypass_status_check) || oai_settings.chat_completion_source === chat_completion_sources.CUSTOM;
     if (canBypass) {
         setOnlineStatus(t`Status check bypassed`);
@@ -4841,6 +4875,28 @@ function getZaiMaxContext(model, isUnlocked) {
 }
 
 /**
+ * Get the maximum context size for the GitHub Copilot model.
+ * Uses context_length from models.dev enrichment data.
+ * @param {string} model Model identifier
+ * @param {boolean} isUnlocked Whether context limits are unlocked
+ * @returns {number} Maximum context size in tokens
+ */
+function getCopilotMaxContext(model, isUnlocked) {
+    if (isUnlocked) {
+        return unlocked_max;
+    }
+
+    if (Array.isArray(model_list) && model_list.length > 0) {
+        const contextLength = model_list.find(record => record.id === model)?.context_length;
+        if (contextLength) {
+            return contextLength;
+        }
+    }
+
+    return max_128k;
+}
+
+/**
  * Get the maximum context size for the SiliconFlow model
  * @param {string} model Model identifier
  * @param {boolean} isUnlocked Whether context limits are unlocked
@@ -5229,6 +5285,13 @@ async function onModelChange() {
         oai_settings.zai_model = value;
     }
 
+    if ($(this).is('#model_copilot_select')) {
+        if (value) {
+            console.log('GitHub Copilot model changed to', value);
+            oai_settings.copilot_model = value;
+        }
+    }
+
     if ([chat_completion_sources.MAKERSUITE, chat_completion_sources.VERTEXAI].includes(oai_settings.chat_completion_source)) {
         if (oai_settings.max_context_unlocked) {
             $('#openai_max_context').attr('max', max_2mil);
@@ -5564,6 +5627,14 @@ async function onModelChange() {
         $('#temp_openai').attr('max', claude_max_temp).val(oai_settings.temp_openai).trigger('input');
     }
 
+    if (oai_settings.chat_completion_source == chat_completion_sources.COPILOT) {
+        const maxContext = getCopilotMaxContext(oai_settings.copilot_model, oai_settings.max_context_unlocked);
+        $('#openai_max_context').attr('max', maxContext);
+        oai_settings.openai_max_context = Math.min(Number($('#openai_max_context').attr('max')), oai_settings.openai_max_context);
+        $('#openai_max_context').val(oai_settings.openai_max_context).trigger('input');
+        $('#temp_openai').attr('max', oai_max_temp).val(oai_settings.temp_openai).trigger('input');
+    }
+
     $('#openai_max_context_counter').attr('max', Number($('#openai_max_context').attr('max')));
 
     saveSettingsDebounced();
@@ -5627,6 +5698,7 @@ async function onConnectButtonClick(e) {
         [chat_completion_sources.ZAI]: { key: SECRET_KEYS.ZAI, selector: '#api_key_zai', proxy: true },
         [chat_completion_sources.CHUTES]: { key: SECRET_KEYS.CHUTES, selector: '#api_key_chutes', proxy: false },
         [chat_completion_sources.POLLINATIONS]: { key: SECRET_KEYS.POLLINATIONS, selector: '#api_key_pollinations', proxy: false },
+        [chat_completion_sources.COPILOT]: { key: SECRET_KEYS.COPILOT, selector: '#api_key_copilot', proxy: false },
     };
 
     // Vertex AI Express version - use API key
@@ -5740,6 +5812,9 @@ function toggleChatCompletionForms() {
     }
     else if (oai_settings.chat_completion_source == chat_completion_sources.ZAI) {
         $('#model_zai_select').trigger('change');
+    }
+    else if (oai_settings.chat_completion_source == chat_completion_sources.COPILOT) {
+        $('#model_copilot_select').trigger('change');
     }
 
     $('[data-source]').each(function () {
@@ -5919,6 +5994,8 @@ export function isImageInliningSupported() {
             return visionSupportedModels.some(model => oai_settings.zai_model.includes(model));
         case chat_completion_sources.SILICONFLOW:
             return visionSupportedModels.some(model => oai_settings.siliconflow_model.includes(model));
+        case chat_completion_sources.COPILOT:
+            return visionSupportedModels.some(model => oai_settings.copilot_model.includes(model));
         default:
             return false;
     }
@@ -6073,6 +6150,106 @@ function onProxyPresetChange() {
     }
     saveSettingsDebounced();
 }
+
+// GitHub Copilot OAuth Device Flow
+$('#copilot_authorize_btn').on('click', async function () {
+    if ($(this).hasClass('disabled')) return;
+    const clientId = String($('#copilot_client_id').val() || '').trim();
+    if (!clientId) {
+        toastr.error(t`Please enter a Client ID`);
+        return;
+    }
+    $(this).addClass('disabled');
+
+    try {
+        $('#copilot_auth_status').show();
+        $('#copilot_auth_message').text(t`Requesting device code...`);
+
+        const deviceResponse = await fetch('/api/backends/chat-completions/copilot/device-code', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ client_id: clientId, copilot_user_agent: oai_settings.copilot_user_agent }),
+        });
+
+        if (!deviceResponse.ok) {
+            const err = await deviceResponse.json();
+            toastr.error(err.message || t`Failed to request device code`);
+            $('#copilot_auth_status').hide();
+            return;
+        }
+
+        const deviceData = await deviceResponse.json();
+        const { device_code, user_code, verification_uri, interval } = deviceData;
+
+        if (!verification_uri || !verification_uri.startsWith('https://github.com/')) {
+            throw new Error('Invalid verification URI received');
+        }
+        $('#copilot_verification_uri').attr('href', verification_uri).text(verification_uri);
+        $('#copilot_user_code').text(user_code);
+        $('#copilot_auth_message').text(t`Waiting for authorization...`);
+
+        const safeInterval = Math.max(1, Math.min(interval || 5, 60));
+        const basePollInterval = safeInterval * 1000 + 3000;
+        let currentPollInterval = basePollInterval;
+        let polling = true;
+        const pollTimeout = 15 * 60 * 1000; // 15 minutes
+        const pollStartTime = Date.now();
+
+        while (polling) {
+            await new Promise(r => setTimeout(r, currentPollInterval));
+
+            if (Date.now() - pollStartTime > pollTimeout) {
+                polling = false;
+                toastr.error(t`Authorization timed out. Please try again.`);
+                $('#copilot_auth_message').text(t`Authorization timed out after 15 minutes.`);
+                break;
+            }
+
+            const tokenResponse = await fetch('/api/backends/chat-completions/copilot/poll-token', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ client_id: clientId, device_code, copilot_user_agent: oai_settings.copilot_user_agent }),
+            });
+
+            if (!tokenResponse.ok) {
+                polling = false;
+                toastr.error(t`Failed to poll authorization status`);
+                $('#copilot_auth_message').text(t`Error: ${tokenResponse.status} ${tokenResponse.statusText}`);
+                break;
+            }
+
+            const tokenData = await tokenResponse.json();
+
+            if (tokenData.access_token) {
+                polling = false;
+                $('#api_key_copilot').val(tokenData.access_token);
+                await writeSecret(SECRET_KEYS.COPILOT, tokenData.access_token);
+                $('#copilot_auth_status').hide();
+                toastr.success(t`GitHub Copilot authorized successfully!`);
+            } else if (tokenData.error === 'authorization_pending') {
+                continue;
+            } else if (tokenData.error === 'slow_down') {
+                const slowInterval = Math.max(1, Math.min(tokenData.interval || 0, 60));
+                currentPollInterval = slowInterval ? slowInterval * 1000 + 3000 : currentPollInterval + 5000;
+                continue;
+            } else if (tokenData.error === 'expired_token') {
+                polling = false;
+                toastr.error(t`Device code expired. Please try again.`);
+                $('#copilot_auth_message').text(t`Device code expired. Please restart authorization.`);
+            } else {
+                polling = false;
+                toastr.error(t`Authorization failed: ${tokenData.error || 'Unknown error'}`);
+                $('#copilot_auth_message').text(t`Error: ${tokenData.error_description || tokenData.error || 'Unknown error'}`);
+            }
+        }
+    } catch (error) {
+        console.error('Copilot OAuth error:', error);
+        toastr.error(t`Failed to authorize with GitHub Copilot`);
+        $('#copilot_auth_message').text(t`Error: ${error.message}`);
+    } finally {
+        $('#copilot_authorize_btn').removeClass('disabled');
+    }
+});
 
 $('#save_proxy').on('click', async function () {
     const presetName = $('#openai_reverse_proxy_name').val();
@@ -6876,6 +7053,7 @@ export function initOpenAI() {
     $('#model_fireworks_select').on('change', onModelChange);
     $('#azure_openai_model').on('change', onModelChange);
     $('#model_zai_select').on('change', onModelChange);
+    $('#model_copilot_select').on('change', onModelChange);
     $('#settings_preset_openai').on('change', onSettingsPresetChange);
     $('#new_oai_preset').on('click', onNewPresetClick);
     $('#delete_oai_preset').on('click', onDeletePresetClick);

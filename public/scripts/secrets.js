@@ -76,6 +76,7 @@ export const SECRET_KEYS = {
     POLLINATIONS: 'api_key_pollinations',
     VOLCENGINE_APP_ID: 'volcengine_app_id',
     VOLCENGINE_ACCESS_KEY: 'volcengine_access_key',
+    COPILOT: 'api_key_copilot',
 };
 
 const FRIENDLY_NAMES = {
@@ -138,6 +139,7 @@ const FRIENDLY_NAMES = {
     [SECRET_KEYS.SILICONFLOW]: 'SiliconFlow',
     [SECRET_KEYS.ELEVENLABS]: 'ElevenLabs TTS',
     [SECRET_KEYS.POLLINATIONS]: 'Pollinations',
+    [SECRET_KEYS.COPILOT]: 'GitHub Copilot',
     [SECRET_KEYS.VOLCENGINE_APP_ID]: 'Volcengine App ID',
     [SECRET_KEYS.VOLCENGINE_ACCESS_KEY]: 'Volcengine Access Key',
 };
@@ -184,6 +186,7 @@ const INPUT_MAP = {
     [SECRET_KEYS.SILICONFLOW]: '#api_key_siliconflow',
     [SECRET_KEYS.COMFY_RUNPOD]: '#api_key_comfy_runpod',
     [SECRET_KEYS.POLLINATIONS]: '#api_key_pollinations',
+    [SECRET_KEYS.COPILOT]: '#api_key_copilot',
 };
 
 const getLabel = () => moment().format('L LT');

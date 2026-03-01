@@ -87,6 +87,32 @@ const API_ZAI_COMMON = 'https://api.z.ai/api/paas/v4';
 const API_ZAI_CODING = 'https://api.z.ai/api/coding/paas/v4';
 const API_SILICONFLOW = 'https://api.siliconflow.com/v1';
 const API_OPENROUTER = 'https://openrouter.ai/api/v1';
+const API_COPILOT = 'https://api.githubcopilot.com';
+// Static model metadata for GitHub Copilot (from models.dev/api.json github-copilot provider)
+const COPILOT_MODEL_DATA = {
+    'gpt-5.2-codex': { name: 'GPT-5.2-Codex', context: 272000, output: 128000 },
+    'gpt-5.1-codex-max': { name: 'GPT-5.1-Codex-max', context: 128000, output: 128000 },
+    'gpt-5.1-codex': { name: 'GPT-5.1-Codex', context: 128000, output: 128000 },
+    'gpt-5.1-codex-mini': { name: 'GPT-5.1-Codex-mini', context: 128000, output: 128000 },
+    'gpt-5': { name: 'GPT-5', context: 128000, output: 128000 },
+    'gpt-5.2': { name: 'GPT-5.2', context: 128000, output: 64000 },
+    'gpt-5.1': { name: 'GPT-5.1', context: 128000, output: 64000 },
+    'gpt-5-mini': { name: 'GPT-5-mini', context: 128000, output: 64000 },
+    'gpt-4.1': { name: 'GPT-4.1', context: 64000, output: 16384 },
+    'gpt-4o': { name: 'GPT-4o', context: 64000, output: 16384 },
+    'claude-sonnet-4.6': { name: 'Claude Sonnet 4.6', context: 128000, output: 32000 },
+    'claude-sonnet-4.5': { name: 'Claude Sonnet 4.5', context: 128000, output: 32000 },
+    'claude-sonnet-4': { name: 'Claude Sonnet 4', context: 128000, output: 16000 },
+    'claude-opus-4.6': { name: 'Claude Opus 4.6', context: 128000, output: 64000 },
+    'claude-opus-4.5': { name: 'Claude Opus 4.5', context: 128000, output: 32000 },
+    'claude-opus-41': { name: 'Claude Opus 4.1', context: 80000, output: 16000 },
+    'claude-haiku-4.5': { name: 'Claude Haiku 4.5', context: 128000, output: 32000 },
+    'gemini-3.1-pro-preview': { name: 'Gemini 3.1 Pro Preview', context: 128000, output: 64000 },
+    'gemini-3-pro-preview': { name: 'Gemini 3 Pro Preview', context: 128000, output: 64000 },
+    'gemini-3-flash-preview': { name: 'Gemini 3 Flash', context: 128000, output: 64000 },
+    'gemini-2.5-pro': { name: 'Gemini 2.5 Pro', context: 128000, output: 64000 },
+    'grok-code-fast-1': { name: 'Grok Code Fast 1', context: 128000, output: 64000 },
+};
 
 /**
  * Module-scoped Claude caching configuration values.
@@ -1632,6 +1658,108 @@ async function sendAzureOpenAIRequest(request, response) {
     }
 }
 
+/**
+ * Sends a request to GitHub Copilot API.
+ * @param {express.Request} request Express request
+ * @param {express.Response} response Express response
+ */
+async function sendCopilotRequest(request, response) {
+    const apiUrl = API_COPILOT;
+    const apiKey = readSecret(request.user.directories, SECRET_KEYS.COPILOT);
+
+    if (!apiKey) {
+        console.warn('GitHub Copilot access token is missing.');
+        return response.status(400).send({ error: true });
+    }
+
+    const controller = new AbortController();
+    request.socket.removeAllListeners('close');
+    request.socket.on('close', function () {
+        controller.abort();
+    });
+
+    try {
+        const processedMessages = postProcessPrompt(request.body.messages, PROMPT_PROCESSING_TYPE.STRICT, getPromptNames(request));
+
+        // Copilot does not support assistant prefill — remove trailing assistant message
+        while (processedMessages.length > 0 && processedMessages[processedMessages.length - 1].role === 'assistant') {
+            processedMessages.pop();
+        }
+
+        // Check if messages contain images for Copilot-Vision-Request header
+        const hasImages = processedMessages.some(msg =>
+            Array.isArray(msg.content) && msg.content.some(part => part.type === 'image_url'),
+        );
+
+        const requestBody = {
+            'messages': processedMessages,
+            'model': request.body.model,
+            'temperature': request.body.temperature,
+            'stream': request.body.stream,
+            'presence_penalty': request.body.presence_penalty,
+            'frequency_penalty': request.body.frequency_penalty,
+            'top_p': request.body.top_p,
+            'stop': request.body.stop,
+        };
+
+        if (request.body.reasoning_effort) {
+            requestBody['reasoning_effort'] = request.body.reasoning_effort;
+        }
+
+        const copilotUserAgent = String(request.body.copilot_user_agent || '').trim() || 'SillyTavern';
+
+        const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + apiKey,
+            'User-Agent': copilotUserAgent,
+            'Openai-Intent': 'conversation-edits',
+            'x-initiator': 'user',
+        };
+
+        if (hasImages) {
+            headers['Copilot-Vision-Request'] = 'true';
+        }
+
+        const config = {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(requestBody),
+            signal: controller.signal,
+        };
+
+        console.debug('GitHub Copilot request:', requestBody);
+
+        const generateResponse = await fetch(apiUrl + '/chat/completions', config);
+
+        if (request.body.stream) {
+            if (!generateResponse.ok) {
+                const errorText = await generateResponse.text();
+                console.warn(`GitHub Copilot API returned error: ${generateResponse.status} ${generateResponse.statusText} ${errorText}`);
+                const errorJson = tryParse(errorText) ?? { error: true };
+                return response.status(500).send(errorJson);
+            }
+            forwardFetchResponse(generateResponse, response);
+        } else {
+            if (!generateResponse.ok) {
+                const errorText = await generateResponse.text();
+                console.warn(`GitHub Copilot API returned error: ${generateResponse.status} ${generateResponse.statusText} ${errorText}`);
+                const errorJson = tryParse(errorText) ?? { error: true };
+                return response.status(500).send(errorJson);
+            }
+            const generateResponseJson = await generateResponse.json();
+            console.debug('GitHub Copilot response:', generateResponseJson);
+            return response.send(generateResponseJson);
+        }
+    } catch (error) {
+        console.error('Error communicating with GitHub Copilot API: ', error);
+        if (!response.headersSent) {
+            response.send({ error: true });
+        } else {
+            response.end();
+        }
+    }
+}
+
 export const router = express.Router();
 
 router.post('/status', async function (request, statusResponse) {
@@ -1829,6 +1957,12 @@ router.post('/status', async function (request, statusResponse) {
             apiUrl = API_SILICONFLOW;
             apiKey = readSecret(request.user.directories, SECRET_KEYS.SILICONFLOW);
             headers = {};
+        } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.COPILOT) {
+            apiUrl = API_COPILOT;
+            apiKey = readSecret(request.user.directories, SECRET_KEYS.COPILOT);
+            headers = {
+                'User-Agent': String(request.body.copilot_user_agent || '').trim() || 'SillyTavern',
+            };
         } else {
             console.warn('This chat completion source is not supported yet.');
             return statusResponse.status(400).send({ error: true });
@@ -1875,6 +2009,22 @@ router.post('/status', async function (request, statusResponse) {
                         }
                         return model;
                     });
+            }
+
+            // Enrich Copilot models with context/output limits from static model data
+            if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.COPILOT && Array.isArray(data?.data)) {
+                data.data = data.data.map(model => {
+                    const info = COPILOT_MODEL_DATA[model.id];
+                    if (info) {
+                        return {
+                            ...model,
+                            context_length: info.context,
+                            max_output_tokens: info.output,
+                            display_name: info.name,
+                        };
+                    }
+                    return model;
+                });
             }
 
             statusResponse.send(data);
@@ -2040,6 +2190,7 @@ router.post('/generate', async function (request, response) {
             case CHAT_COMPLETION_SOURCES.CHUTES: return await sendChutesRequest(request, response);
             case CHAT_COMPLETION_SOURCES.ELECTRONHUB: return await sendElectronHubRequest(request, response);
             case CHAT_COMPLETION_SOURCES.AZURE_OPENAI: return await sendAzureOpenAIRequest(request, response);
+            case CHAT_COMPLETION_SOURCES.COPILOT: return await sendCopilotRequest(request, response);
         }
 
         let apiUrl;
@@ -2438,6 +2589,76 @@ router.post('/generate', async function (request, response) {
         } else {
             response.end();
         }
+    }
+});
+
+// GitHub Copilot OAuth Device Flow
+router.post('/copilot/device-code', async function (request, response) {
+    try {
+        const clientId = request.body.client_id;
+        if (!clientId) {
+            return response.status(400).send({ error: true, message: 'Client ID is required' });
+        }
+
+        const copilotUserAgent = String(request.body.copilot_user_agent || '').trim() || 'SillyTavern';
+
+        const res = await fetch('https://github.com/login/device/code', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'User-Agent': copilotUserAgent,
+            },
+            body: JSON.stringify({
+                client_id: clientId,
+                scope: 'read:user',
+            }),
+        });
+
+        if (!res.ok) {
+            const errorText = await res.text();
+            console.error('GitHub device code request failed:', errorText);
+            return response.status(res.status).send({ error: true, message: errorText });
+        }
+
+        const data = await res.json();
+        const { device_code, user_code, verification_uri, interval, expires_in } = data;
+        return response.send({ device_code, user_code, verification_uri, interval, expires_in });
+    } catch (error) {
+        console.error('Error requesting GitHub device code:', error);
+        return response.status(500).send({ error: true, message: error.message });
+    }
+});
+
+router.post('/copilot/poll-token', async function (request, response) {
+    try {
+        const { client_id, device_code } = request.body;
+        if (!client_id || !device_code) {
+            return response.status(400).send({ error: true, message: 'client_id and device_code are required' });
+        }
+
+        const copilotUserAgent = String(request.body.copilot_user_agent || '').trim() || 'SillyTavern';
+
+        const res = await fetch('https://github.com/login/oauth/access_token', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'User-Agent': copilotUserAgent,
+            },
+            body: JSON.stringify({
+                client_id: client_id,
+                device_code: device_code,
+                grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+            }),
+        });
+
+        const data = await res.json();
+        const { access_token, token_type, scope, error: oauthError, error_description, interval: pollInterval } = data;
+        return response.send({ access_token, token_type, scope, error: oauthError, error_description, interval: pollInterval });
+    } catch (error) {
+        console.error('Error polling GitHub token:', error);
+        return response.status(500).send({ error: true, message: error.message });
     }
 });
 
