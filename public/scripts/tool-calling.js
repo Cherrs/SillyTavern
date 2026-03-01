@@ -467,6 +467,31 @@ export class ToolManager {
                 }
             }
         }
+
+        const responsesOutput = Array.isArray(parsed?.response?.output)
+            ? parsed.response.output
+            : (Array.isArray(parsed?.output) ? parsed.output : null);
+        if (Array.isArray(responsesOutput)) {
+            const responsesToolCalls = responsesOutput
+                .filter(item => item?.type === 'function_call')
+                .map((item, index) => {
+                    const args = item?.arguments ?? item?.input ?? item?.function?.arguments ?? {};
+                    const serializedArguments = typeof args === 'string' ? args : JSON.stringify(args ?? {});
+                    return {
+                        id: String(item?.call_id ?? item?.id ?? `call_${index}`),
+                        function: {
+                            name: String(item?.name ?? item?.function?.name ?? ''),
+                            arguments: serializedArguments,
+                        },
+                    };
+                })
+                .filter(toolCall => toolCall.function.name.length > 0);
+
+            if (responsesToolCalls.length > 0) {
+                toolCalls[0] = responsesToolCalls;
+            }
+        }
+
         const cohereToolEvents = ['message-start', 'tool-call-start', 'tool-call-delta', 'tool-call-end'];
         if (cohereToolEvents.includes(parsed?.type) && typeof parsed?.delta?.message === 'object') {
             const choiceIndex = 0;
@@ -693,6 +718,17 @@ export class ToolManager {
         const isGoogleToolCall = c => Array.isArray(c) ? c.filter(x => x).every(isGoogleToolCall) : c?.name && c?.args;
         const convertClaudeToolCall = c => ({ id: c.id, function: { name: c.name, arguments: c.input } });
         const convertGoogleToolCall = (c, signature = null) => ({ id: getRandomId(), function: { name: c.name, arguments: c.args }, signature });
+        const convertResponsesToolCall = (c, index) => {
+            const args = c?.arguments ?? c?.input ?? c?.function?.arguments ?? {};
+            const serializedArguments = typeof args === 'string' ? args : JSON.stringify(args ?? {});
+            return {
+                id: String(c?.call_id ?? c?.id ?? `call_${index}`),
+                function: {
+                    name: String(c?.name ?? c?.function?.name ?? ''),
+                    arguments: serializedArguments,
+                },
+            };
+        };
 
         // Parsed tool calls from streaming data
         if (Array.isArray(data) && data.length > 0 && Array.isArray(data[0])) {
@@ -714,6 +750,21 @@ export class ToolManager {
         // Google AI Studio tool calls
         if (Array.isArray(data?.responseContent?.parts)) {
             return data.responseContent.parts.filter(p => p.functionCall).map(p => convertGoogleToolCall(p.functionCall, p.thoughtSignature));
+        }
+
+        // OpenAI Responses API output format
+        const responsesOutput = Array.isArray(data?.response?.output)
+            ? data.response.output
+            : (Array.isArray(data?.output) ? data.output : null);
+        if (Array.isArray(responsesOutput)) {
+            const responsesToolCalls = responsesOutput
+                .filter(item => item?.type === 'function_call')
+                .map(convertResponsesToolCall)
+                .filter(toolCall => toolCall.function.name.length > 0);
+
+            if (responsesToolCalls.length > 0) {
+                return responsesToolCalls;
+            }
         }
 
         // Parsed tool calls from non-streaming data

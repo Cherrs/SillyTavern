@@ -1659,6 +1659,261 @@ async function sendAzureOpenAIRequest(request, response) {
 }
 
 /**
+ * Gets plain text from a Responses API content part.
+ * @param {any} part Content part
+ * @returns {string} Text
+ */
+function getResponsesPartText(part) {
+    if (typeof part === 'string') {
+        return part;
+    }
+    if (typeof part?.text === 'string') {
+        return part.text;
+    }
+    if (typeof part?.content === 'string') {
+        return part.content;
+    }
+    if (typeof part?.value === 'string') {
+        return part.value;
+    }
+    return '';
+}
+
+/**
+ * Extracts assistant text content from a Copilot Responses API payload.
+ * @param {any[]} output Responses API output array
+ * @returns {string} Assistant message text
+ */
+function extractCopilotResponsesText(output) {
+    if (!Array.isArray(output)) {
+        return '';
+    }
+
+    const texts = output
+        .filter(item => item?.type === 'message')
+        .flatMap(item => {
+            const content = Array.isArray(item?.content) ? item.content : [item?.content ?? item?.text];
+            return content.map(getResponsesPartText);
+        })
+        .filter(Boolean);
+
+    return texts.join('');
+}
+
+/**
+ * Extracts reasoning text from a Copilot Responses API payload.
+ * @param {any[]} output Responses API output array
+ * @returns {string} Reasoning text
+ */
+function extractCopilotResponsesReasoningText(output) {
+    if (!Array.isArray(output)) {
+        return '';
+    }
+
+    const texts = output
+        .filter(item => item?.type === 'reasoning')
+        .flatMap(item => {
+            const summary = Array.isArray(item?.summary) ? item.summary.map(getResponsesPartText) : [];
+            const content = Array.isArray(item?.content) ? item.content.map(getResponsesPartText) : [];
+            return [item?.reasoning_text, item?.summary_text, item?.text, ...summary, ...content].filter(x => typeof x === 'string' && x.length > 0);
+        });
+
+    return texts.join('\n\n');
+}
+
+/**
+ * Extracts encrypted reasoning payload from a Copilot Responses API payload.
+ * @param {any[]} output Responses API output array
+ * @returns {string|null} Encrypted reasoning payload
+ */
+function extractCopilotResponsesReasoningOpaque(output) {
+    if (!Array.isArray(output)) {
+        return null;
+    }
+
+    const reasoningItem = output.find(item => item?.type === 'reasoning' && (typeof item?.reasoning_opaque === 'string' || typeof item?.encrypted_content === 'string'));
+    return reasoningItem?.reasoning_opaque ?? reasoningItem?.encrypted_content ?? null;
+}
+
+/**
+ * Extracts function tool calls from a Copilot Responses API payload.
+ * @param {any[]} output Responses API output array
+ * @returns {any[]} OpenAI-compatible tool calls
+ */
+function extractCopilotResponsesToolCalls(output) {
+    if (!Array.isArray(output)) {
+        return [];
+    }
+
+    return output
+        .filter(item => item?.type === 'function_call')
+        .map((item, index) => {
+            const args = item?.arguments ?? item?.input ?? item?.function?.arguments ?? {};
+            const serializedArguments = typeof args === 'string' ? args : JSON.stringify(args ?? {});
+            return {
+                id: String(item?.call_id ?? item?.id ?? `call_${index}`),
+                type: 'function',
+                function: {
+                    name: String(item?.name ?? item?.function?.name ?? ''),
+                    arguments: serializedArguments,
+                },
+            };
+        })
+        .filter(toolCall => toolCall.function.name.length > 0);
+}
+
+/**
+ * Normalizes Copilot Responses API payload to Chat Completions shape.
+ * @param {any} payload API payload
+ * @returns {any} Normalized payload
+ */
+function normalizeCopilotResponsesPayload(payload) {
+    if (!Array.isArray(payload?.output) || Array.isArray(payload?.choices)) {
+        return payload;
+    }
+
+    const content = extractCopilotResponsesText(payload.output);
+    const reasoningText = extractCopilotResponsesReasoningText(payload.output);
+    const reasoningOpaque = extractCopilotResponsesReasoningOpaque(payload.output);
+    const toolCalls = extractCopilotResponsesToolCalls(payload.output);
+
+    const promptTokens = Number(payload?.usage?.prompt_tokens ?? payload?.usage?.input_tokens);
+    const completionTokens = Number(payload?.usage?.completion_tokens ?? payload?.usage?.output_tokens);
+    const reasoningTokens = Number(payload?.usage?.completion_tokens_details?.reasoning_tokens ?? payload?.usage?.output_tokens_details?.reasoning_tokens ?? payload?.usage?.reasoning_tokens);
+    const usage = {};
+
+    if (Number.isFinite(promptTokens)) {
+        usage.prompt_tokens = promptTokens;
+    }
+
+    if (Number.isFinite(completionTokens)) {
+        usage.completion_tokens = completionTokens;
+    }
+
+    if (Number.isFinite(promptTokens) || Number.isFinite(completionTokens)) {
+        usage.total_tokens = (Number.isFinite(promptTokens) ? promptTokens : 0) + (Number.isFinite(completionTokens) ? completionTokens : 0);
+    }
+
+    if (Number.isFinite(reasoningTokens)) {
+        usage.completion_tokens_details = { reasoning_tokens: reasoningTokens };
+    }
+
+    return {
+        id: payload.id,
+        object: 'chat.completion',
+        created: payload.created ?? Math.floor(Date.now() / 1000),
+        model: payload.model,
+        choices: [
+            {
+                index: 0,
+                finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+                message: {
+                    role: 'assistant',
+                    content: content ?? '',
+                    ...(reasoningText ? { reasoning_text: reasoningText, reasoning_content: reasoningText } : {}),
+                    ...(reasoningOpaque ? { reasoning_opaque: reasoningOpaque } : {}),
+                    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+                },
+            },
+        ],
+        ...(Object.keys(usage).length > 0 ? { usage } : {}),
+    };
+}
+
+/**
+ * Sends a Chat Completions payload as a minimal SSE stream.
+ * @param {express.Response} response Express response
+ * @param {any} completionPayload Chat Completions payload
+ * @returns {void}
+ */
+function sendCopilotCompletionAsSse(response, completionPayload) {
+    const choice = completionPayload?.choices?.[0] ?? {};
+    const message = choice?.message ?? {};
+    const delta = {};
+
+    if (typeof message?.content === 'string' && message.content.length > 0) {
+        delta.content = message.content;
+    }
+
+    if (typeof message?.reasoning_text === 'string' && message.reasoning_text.length > 0) {
+        delta.reasoning_text = message.reasoning_text;
+    }
+
+    if (typeof message?.reasoning_content === 'string' && message.reasoning_content.length > 0) {
+        delta.reasoning_content = message.reasoning_content;
+    }
+
+    if (typeof message?.reasoning_opaque === 'string' && message.reasoning_opaque.length > 0) {
+        delta.reasoning_opaque = message.reasoning_opaque;
+    }
+
+    if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+        delta.tool_calls = message.tool_calls.map((toolCall, index) => ({ index, ...toolCall }));
+    }
+
+    const chunk = {
+        id: completionPayload?.id,
+        object: 'chat.completion.chunk',
+        created: completionPayload?.created ?? Math.floor(Date.now() / 1000),
+        model: completionPayload?.model,
+        choices: [
+            {
+                index: typeof choice?.index === 'number' ? choice.index : 0,
+                delta,
+                finish_reason: null,
+            },
+        ],
+    };
+
+    const finishChunk = {
+        id: completionPayload?.id,
+        object: 'chat.completion.chunk',
+        created: completionPayload?.created ?? Math.floor(Date.now() / 1000),
+        model: completionPayload?.model,
+        choices: [
+            {
+                index: typeof choice?.index === 'number' ? choice.index : 0,
+                delta: {},
+                finish_reason: choice?.finish_reason ?? (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0 ? 'tool_calls' : 'stop'),
+            },
+        ],
+    };
+
+    response.status(200);
+    response.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+    response.flushHeaders?.();
+    response.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    response.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
+    response.write('data: [DONE]\n\n');
+    response.end();
+}
+
+/**
+ * Checks whether the model ID is GPT-5 or later.
+ * @param {string} modelID Model ID
+ * @returns {boolean} Whether the model is GPT-5+
+ */
+function isGpt5OrLater(modelID) {
+    const match = /^gpt-(\d+)/.exec(String(modelID).toLowerCase());
+    if (!match) {
+        return false;
+    }
+    return Number(match[1]) >= 5;
+}
+
+/**
+ * Determines whether Copilot should use the Responses API for a given model.
+ * @param {string} modelID Model ID
+ * @returns {boolean} Whether to use /responses
+ */
+function shouldUseCopilotResponsesApi(modelID) {
+    const normalizedModelID = String(modelID).toLowerCase();
+    return isGpt5OrLater(normalizedModelID) && !normalizedModelID.startsWith('gpt-5-mini');
+}
+
+/**
  * Sends a request to GitHub Copilot API.
  * @param {express.Request} request Express request
  * @param {express.Response} response Express response
@@ -1680,10 +1935,20 @@ async function sendCopilotRequest(request, response) {
 
     try {
         const processedMessages = postProcessPrompt(request.body.messages, PROMPT_PROCESSING_TYPE.STRICT, getPromptNames(request));
+        const modelID = String(request.body.model || '');
+        const useResponsesApi = shouldUseCopilotResponsesApi(modelID);
 
         // Copilot does not support assistant prefill — remove trailing assistant message
         while (processedMessages.length > 0 && processedMessages[processedMessages.length - 1].role === 'assistant') {
             processedMessages.pop();
+        }
+
+        // Copilot expects encrypted reasoning context on assistant messages as reasoning_opaque.
+        for (const message of processedMessages) {
+            if (message?.role === 'assistant' && typeof message?.signature === 'string' && message.signature.length > 0) {
+                message.reasoning_opaque ??= message.signature;
+                delete message.signature;
+            }
         }
 
         // Check if messages contain images for Copilot-Vision-Request header
@@ -1691,33 +1956,67 @@ async function sendCopilotRequest(request, response) {
             Array.isArray(msg.content) && msg.content.some(part => part.type === 'image_url'),
         );
 
-        const requestBody = {
-            'messages': processedMessages,
-            'model': request.body.model,
-            'temperature': request.body.temperature,
-            'stream': request.body.stream,
-            'presence_penalty': request.body.presence_penalty,
-            'frequency_penalty': request.body.frequency_penalty,
-            'top_p': request.body.top_p,
-            'stop': request.body.stop,
-        };
+        const requestBody = useResponsesApi
+            ? {
+                input: processedMessages,
+                model: request.body.model,
+                stream: request.body.stream,
+                temperature: request.body.temperature,
+                top_p: request.body.top_p,
+                max_output_tokens: request.body.max_tokens,
+                stop: request.body.stop,
+                include: ['reasoning.encrypted_content'],
+            }
+            : {
+                messages: processedMessages,
+                model: request.body.model,
+                temperature: request.body.temperature,
+                stream: request.body.stream,
+                presence_penalty: request.body.presence_penalty,
+                frequency_penalty: request.body.frequency_penalty,
+                top_p: request.body.top_p,
+                stop: request.body.stop,
+            };
 
         if (request.body.reasoning_effort) {
-            requestBody['reasoning_effort'] = request.body.reasoning_effort;
+            if (useResponsesApi) {
+                requestBody.reasoning = { effort: request.body.reasoning_effort };
+            } else {
+                requestBody.reasoning_effort = request.body.reasoning_effort;
+            }
+        }
+
+        if (!useResponsesApi && typeof request.body.include_reasoning === 'boolean') {
+            requestBody.include_reasoning = request.body.include_reasoning;
+        }
+
+        if (Array.isArray(request.body.tools) && request.body.tools.length > 0) {
+            requestBody.tools = request.body.tools;
+        }
+
+        if (request.body.tool_choice) {
+            requestBody.tool_choice = request.body.tool_choice;
         }
 
         const copilotUserAgent = String(request.body.copilot_user_agent || '').trim() || 'SillyTavern';
+        const xInitiator = String(request.body.x_initiator || '').trim();
+        const copilotInitiator = xInitiator === 'agent' ? 'agent' : 'user';
+        const isAnthropicModel = /^claude-/.test(String(request.body.model));
 
         const headers = {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + apiKey,
             'User-Agent': copilotUserAgent,
             'Openai-Intent': 'conversation-edits',
-            'x-initiator': 'user',
+            'x-initiator': copilotInitiator,
         };
 
         if (hasImages) {
             headers['Copilot-Vision-Request'] = 'true';
+        }
+
+        if (isAnthropicModel) {
+            headers['anthropic-beta'] = 'interleaved-thinking-2025-05-14';
         }
 
         const config = {
@@ -1729,7 +2028,8 @@ async function sendCopilotRequest(request, response) {
 
         console.debug('GitHub Copilot request:', requestBody);
 
-        const generateResponse = await fetch(apiUrl + '/chat/completions', config);
+        const endpoint = useResponsesApi ? '/responses' : '/chat/completions';
+        const generateResponse = await fetch(apiUrl + endpoint, config);
 
         if (request.body.stream) {
             if (!generateResponse.ok) {
@@ -1737,6 +2037,18 @@ async function sendCopilotRequest(request, response) {
                 console.warn(`GitHub Copilot API returned error: ${generateResponse.status} ${generateResponse.statusText} ${errorText}`);
                 const errorJson = tryParse(errorText) ?? { error: true };
                 return response.status(500).send(errorJson);
+            }
+            const contentType = String(generateResponse.headers.get('content-type') || '');
+            if (!/text\/event-stream/i.test(contentType)) {
+                const maybeJson = tryParse(await generateResponse.text());
+                if (maybeJson && typeof maybeJson === 'object') {
+                    const normalized = normalizeCopilotResponsesPayload(maybeJson);
+                    if (normalized?.error || !Array.isArray(normalized?.choices)) {
+                        return response.status(500).send(normalized);
+                    }
+                    return sendCopilotCompletionAsSse(response, normalized);
+                }
+                return response.status(500).send({ error: true, message: 'Invalid response format from GitHub Copilot API' });
             }
             forwardFetchResponse(generateResponse, response);
         } else {
@@ -1746,7 +2058,7 @@ async function sendCopilotRequest(request, response) {
                 const errorJson = tryParse(errorText) ?? { error: true };
                 return response.status(500).send(errorJson);
             }
-            const generateResponseJson = await generateResponse.json();
+            const generateResponseJson = normalizeCopilotResponsesPayload(await generateResponse.json());
             console.debug('GitHub Copilot response:', generateResponseJson);
             return response.send(generateResponseJson);
         }

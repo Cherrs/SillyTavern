@@ -123,6 +123,32 @@ export function extractReasoningFromData(data, {
                     return data?.content?.find(part => part.type === 'thinking')?.thinking ?? '';
                 case chat_completion_sources.MISTRALAI:
                     return data?.choices?.[0]?.message?.content?.[0]?.thinking?.map(part => part.text)?.filter(x => x)?.join('\n\n') ?? '';
+                case chat_completion_sources.COPILOT: {
+                    const responsesOutput = Array.isArray(data?.response?.output)
+                        ? data.response.output
+                        : (Array.isArray(data?.output) ? data.output : null);
+                    const responsesReasoning = Array.isArray(responsesOutput)
+                        ? responsesOutput
+                            .filter(item => item?.type === 'reasoning')
+                            .flatMap(item => {
+                                const summary = Array.isArray(item?.summary)
+                                    ? item.summary.map(part => typeof part === 'string' ? part : (part?.text ?? part?.content ?? part?.value ?? ''))
+                                    : [];
+                                const content = Array.isArray(item?.content)
+                                    ? item.content.map(part => typeof part === 'string' ? part : (part?.text ?? part?.content ?? part?.value ?? ''))
+                                    : [];
+                                return [item?.reasoning_text, item?.summary_text, item?.text, ...summary, ...content];
+                            })
+                            .filter(x => typeof x === 'string' && x.length > 0)
+                            .join('\n\n')
+                        : '';
+
+                    return data?.choices?.[0]?.message?.reasoning_text
+                        ?? data?.choices?.[0]?.message?.reasoning_content
+                        ?? data?.choices?.[0]?.message?.reasoning
+                        ?? responsesReasoning
+                        ?? '';
+                }
                 case chat_completion_sources.AIMLAPI:
                 case chat_completion_sources.POLLINATIONS:
                 case chat_completion_sources.MOONSHOT:
@@ -132,7 +158,6 @@ export function extractReasoningFromData(data, {
                 case chat_completion_sources.NANOGPT:
                 case chat_completion_sources.SILICONFLOW:
                 case chat_completion_sources.ZAI:
-                case chat_completion_sources.COPILOT:
                 case chat_completion_sources.CUSTOM: {
                     return data?.choices?.[0]?.message?.reasoning_content
                         ?? data?.choices?.[0]?.message?.reasoning
@@ -158,12 +183,25 @@ export function extractReasoningSignatureFromData(data, {
     mainApi = null,
     chatCompletionSource = null,
 } = {}) {
-    // Only Gemini models use thought signatures (via MakerSuite/VertexAI or OpenRouter)
+    // Gemini/OpenRouter use thought signatures, while Copilot uses reasoning_opaque.
     if ((mainApi ?? main_api) !== 'openai') {
         return null;
     }
 
     const source = chatCompletionSource ?? oai_settings.chat_completion_source;
+    if (source === chat_completion_sources.COPILOT) {
+        const responsesOutput = Array.isArray(data?.response?.output)
+            ? data.response.output
+            : (Array.isArray(data?.output) ? data.output : null);
+        const responsesOpaque = Array.isArray(responsesOutput)
+            ? responsesOutput.find(item => item?.type === 'reasoning' && (typeof item?.reasoning_opaque === 'string' || typeof item?.encrypted_content === 'string'))
+            : null;
+        return data?.choices?.[0]?.message?.reasoning_opaque
+            ?? responsesOpaque?.reasoning_opaque
+            ?? responsesOpaque?.encrypted_content
+            ?? null;
+    }
+
     const isGemini = source === chat_completion_sources.MAKERSUITE || source === chat_completion_sources.VERTEXAI;
     const isOpenRouter = source === chat_completion_sources.OPENROUTER;
 

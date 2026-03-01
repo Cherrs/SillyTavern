@@ -2989,7 +2989,60 @@ export function getStreamingReply(data, state, { chatCompletionSource = null, ov
             }
         });
         return data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '';
-    } else if ([chat_completion_sources.CUSTOM, chat_completion_sources.POLLINATIONS, chat_completion_sources.AIMLAPI, chat_completion_sources.MOONSHOT, chat_completion_sources.COMETAPI, chat_completion_sources.ELECTRONHUB, chat_completion_sources.NANOGPT, chat_completion_sources.ZAI, chat_completion_sources.SILICONFLOW, chat_completion_sources.CHUTES, chat_completion_sources.COPILOT].includes(chat_completion_source)) {
+    } else if (chat_completion_source === chat_completion_sources.COPILOT) {
+        const responsesOutput = Array.isArray(data?.response?.output)
+            ? data.response.output
+            : (Array.isArray(data?.output) ? data.output : null);
+        if (Array.isArray(responsesOutput)) {
+            if (show_thoughts) {
+                const responsesReasoning = responsesOutput
+                    .filter(item => item?.type === 'reasoning')
+                    .flatMap(item => {
+                        const summary = Array.isArray(item?.summary)
+                            ? item.summary.map(part => typeof part === 'string' ? part : (part?.text ?? part?.content ?? part?.value ?? ''))
+                            : [];
+                        const content = Array.isArray(item?.content)
+                            ? item.content.map(part => typeof part === 'string' ? part : (part?.text ?? part?.content ?? part?.value ?? ''))
+                            : [];
+                        return [item?.reasoning_text, item?.summary_text, item?.text, ...summary, ...content];
+                    })
+                    .filter(x => typeof x === 'string' && x.length > 0)
+                    .join('\n\n');
+                state.reasoning += responsesReasoning;
+            }
+
+            const responsesOpaqueItem = responsesOutput.find(item =>
+                item?.type === 'reasoning' && (typeof item?.reasoning_opaque === 'string' || typeof item?.encrypted_content === 'string'),
+            );
+            const responsesOpaque = responsesOpaqueItem?.reasoning_opaque ?? responsesOpaqueItem?.encrypted_content;
+            if (responsesOpaque) {
+                state.signature = responsesOpaque;
+            }
+
+            const responsesText = responsesOutput
+                .filter(item => item?.type === 'message')
+                .flatMap(item => Array.isArray(item?.content) ? item.content : [item?.content ?? item?.text])
+                .map(part => typeof part === 'string'
+                    ? part
+                    : (part?.text ?? part?.content ?? part?.value ?? ''))
+                .filter(Boolean)
+                .join('');
+            return responsesText;
+        }
+
+        if (show_thoughts) {
+            state.reasoning +=
+                data.choices?.filter(x => x?.delta?.reasoning_text)?.[0]?.delta?.reasoning_text ??
+                data.choices?.filter(x => x?.delta?.reasoning_content)?.[0]?.delta?.reasoning_content ??
+                data.choices?.filter(x => x?.delta?.reasoning)?.[0]?.delta?.reasoning ??
+                '';
+        }
+        const reasoningOpaque = data?.choices?.[0]?.delta?.reasoning_opaque ?? data?.choices?.[0]?.message?.reasoning_opaque;
+        if (reasoningOpaque) {
+            state.signature = reasoningOpaque;
+        }
+        return data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '';
+    } else if ([chat_completion_sources.CUSTOM, chat_completion_sources.POLLINATIONS, chat_completion_sources.AIMLAPI, chat_completion_sources.MOONSHOT, chat_completion_sources.COMETAPI, chat_completion_sources.ELECTRONHUB, chat_completion_sources.NANOGPT, chat_completion_sources.ZAI, chat_completion_sources.SILICONFLOW, chat_completion_sources.CHUTES].includes(chat_completion_source)) {
         if (show_thoughts) {
             state.reasoning +=
                 data.choices?.filter(x => x?.delta?.reasoning_content)?.[0]?.delta?.reasoning_content ??
@@ -6091,7 +6144,8 @@ export function isReasoningSignatureSupported(settings = oai_settings) {
     const isGoogle = [chat_completion_sources.VERTEXAI, chat_completion_sources.MAKERSUITE].includes(settings.chat_completion_source);
     // Need a more crunchy check for OpenRouter: look for Gemini models
     const isOpenRouterGemini = settings.chat_completion_source === chat_completion_sources.OPENROUTER && /google\/gemini/i.test(settings.openrouter_model);
-    return isGoogle || isOpenRouterGemini;
+    const isCopilot = settings.chat_completion_source === chat_completion_sources.COPILOT;
+    return isGoogle || isOpenRouterGemini || isCopilot;
 }
 
 /**
@@ -7023,6 +7077,10 @@ export function initOpenAI() {
     });
     $('#zai_endpoint').on('input', function () {
         oai_settings.zai_endpoint = String($(this).val());
+        saveSettingsDebounced();
+    });
+    $('#copilot_user_agent').on('input', function () {
+        oai_settings.copilot_user_agent = String($(this).val());
         saveSettingsDebounced();
     });
     $('#vertexai_service_account_json').on('input', onVertexAIServiceAccountJsonChange);
